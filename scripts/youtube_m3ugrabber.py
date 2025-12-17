@@ -170,6 +170,7 @@ def extract_stream_with_yt_dlp(url: str, cookiefile: Optional[str] = None, timeo
         # 🔓 contornar bloqueios por país (Portugal)
         "geo_bypass": True,
         "geo_bypass_country": "PT",
+        "xff": "PT",
 
         # 🌐 user-agent mais "normal" (ajuda em alguns casos)
         "http_headers": {
