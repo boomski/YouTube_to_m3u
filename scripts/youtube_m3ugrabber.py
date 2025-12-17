@@ -26,7 +26,7 @@ except Exception:
     print("Erro: yt-dlp não instalado. Faz: pip install yt-dlp", file=sys.stderr)
     raise
 
-FALLBACK_M3U = "https://raw.githubusercontent.com/thomraider12/YouTube_to_m3u/main/assets/offline.mp4"
+FALLBACK_M3U = "https://raw.githubusercontent.com/thomraider12/YouTube_to_m3u/main/assets/offline.m3u"
 
 
 def write_temp_cookies(cookies_text: str) -> Optional[str]:
@@ -197,7 +197,7 @@ def process_file(infile: str, outfile, cookiefile: Optional[str]) -> None:
     with open(infile, "r", encoding="utf-8", errors="ignore") as f:
         lines = [ln.rstrip("\n") for ln in f]
 
-    outfile.write('#EXTM3U"\n')
+    outfile.write('#EXTM3U\n')
 
     for line in lines:
         line = line.strip()
