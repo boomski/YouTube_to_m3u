@@ -157,28 +157,32 @@ def choose_best_stream_url(info: Dict[str, Any]) -> str:
 
 def extract_stream_with_yt_dlp(url: str, cookiefile: Optional[str] = None, timeout: int = 15) -> str:
     """
-    Extrai info com yt-dlp e usa choose_best_stream_url para devolver a melhor URL disponível.
+    Extrai info com yt-dlp e usa choose_best_stream_url
+    para devolver a melhor URL disponível.
     """
-	ydl_opts = {
-		"quiet": True,
-		"no_warnings": True,
-		"skip_download": True,
-		"dump_single_json": True,
-		"socket_timeout": timeout,
-		# 🔓 contornar bloqueios por país (Portugal)
-		"geo_bypass": True,
-		"geo_bypass_country": "PT",
-		# 🌐 user-agent mais "normal" (ajuda em alguns casos)
-		"http_headers": {
-			"User-Agent": (
-				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-				"AppleWebKit/537.36 (KHTML, like Gecko) "
-				"Chrome/120.0.0.0 Safari/537.36"
-			)
-		},
-		# não forçar formato aqui — queremos listar todos os formatos
-		# "format": "bestvideo+bestaudio/best",
-	}
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "dump_single_json": True,
+        "socket_timeout": timeout,
+
+        # 🔓 contornar bloqueios por país (Portugal)
+        "geo_bypass": True,
+        "geo_bypass_country": "PT",
+
+        # 🌐 user-agent mais "normal" (ajuda em alguns casos)
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        },
+
+        # não forçar formato aqui — queremos listar todos os formatos
+        # "format": "bestvideo+bestaudio/best",
+    }
 
     if cookiefile:
         ydl_opts["cookiefile"] = cookiefile
