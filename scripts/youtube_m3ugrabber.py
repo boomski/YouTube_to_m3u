@@ -2,14 +2,13 @@
 # coding: utf-8
 """
 youtube_m3ugrabber.py
-Gera um ficheiro .m3u8 por canal dentro da pasta "canais".
-Cada ficheiro tem o nome do canal (santizado) e inclui o link do stream
-(escolhido pela mesma lógica de qualidade do script original).
+Gera um .m3u8 por canal em ./canais (ou em --outdir) e adiciona EXTVLCOPT
+(ua, referrer, cookies) para facilitar que o VLC consiga carregar os segmentos.
+Tenta primeiro usar `yt-dlp -g` para obter URLs directas; se falhar usa a API.
 
-Uso:
+Usage:
   python3 youtube_m3ugrabber.py -i ../youtube_channel_info.txt
-  python3 youtube_m3ugrabber.py -i ../youtube_channel_info.txt --outdir ./canais --timeout 20
-
+  python3 youtube_m3ugrabber.py -i ../youtube_channel_info.txt -o ./canais --timeout 20
 """
 from __future__ import annotations
 import os
@@ -19,16 +18,17 @@ import logging
 import tempfile
 import stat
 import re
+import shlex
+import subprocess
 from typing import Optional, Dict, Any, List
-from urllib.parse import urlparse, quote_plus
+
+# fallback se algo falhar
+FALLBACK_M3U = "https://raw.githubusercontent.com/thomraider12/YouTube_to_m3u/main/assets/offline.m3u"
 
 try:
     from yt_dlp import YoutubeDL
 except Exception:
-    print("Erro: yt-dlp não instalado. Faz: pip install yt-dlp", file=sys.stderr)
-    raise
-
-FALLBACK_M3U = "https://raw.githubusercontent.com/thomraider12/YouTube_to_m3u/main/assets/offline.m3u"
+    YoutubeDL = None  # usaremos subprocess fallback se a import falhar
 
 
 def write_temp_cookies(cookies_text: str) -> Optional[str]:
@@ -132,60 +132,88 @@ def choose_best_stream_url(info: Dict[str, Any]) -> str:
     return FALLBACK_M3U
 
 
-def extract_stream_with_yt_dlp(url: str, cookiefile: Optional[str] = None, timeout: int = 15) -> str:
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "dump_single_json": True,
-        "socket_timeout": timeout,
-        "geo_bypass": True,
-        "geo_bypass_country": "PT",
-        "xff": "PT",
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        },
-    }
-
+def yt_dlp_get_direct_url_cli(url: str, cookiefile: Optional[str] = None, timeout: int = 15) -> Optional[str]:
+    """
+    Usa o binário yt-dlp com -g para tentar obter URLs directas.
+    Retorna a primeira URL .m3u8 encontrada, senão a primeira linha do stdout.
+    """
+    cmd = ["yt-dlp", "-g", "--geo-bypass", "--geo-bypass-country", "PT"]
     if cookiefile:
-        ydl_opts["cookiefile"] = cookiefile
-
+        cmd += ["--cookies", cookiefile]
+    # evitar mensagens interativas
+    cmd += [url]
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        logging.debug("Executando: %s", " ".join(shlex.quote(x) for x in cmd))
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if res.returncode != 0:
+            logging.debug("yt-dlp -g devolveu código %s; stderr: %s", res.returncode, res.stderr.strip())
+            return None
+        out = res.stdout.strip()
+        if not out:
+            return None
+        lines = [l.strip() for l in out.splitlines() if l.strip()]
+        # preferir m3u8 se houver
+        for ln in lines:
+            if ".m3u8" in ln:
+                return ln
+        return lines[0]
     except Exception as e:
-        logging.debug("yt-dlp falhou para %s : %s", url, e)
-        return FALLBACK_M3U
+        logging.debug("Erro ao correr yt-dlp -g: %s", e)
+        return None
 
-    try:
-        chosen = choose_best_stream_url(info)
-        return chosen
-    except Exception as e:
-        logging.debug("Erro a escolher stream para %s : %s", url, e)
-        if info.get("url"):
-            return info.get("url")
-        return FALLBACK_M3U
+
+def extract_stream_with_yt_dlp(url: str, cookiefile: Optional[str] = None, timeout: int = 15) -> str:
+    """
+    Tenta:
+      1) yt-dlp -g para obter URL directa (prefere m3u8)
+      2) API Python do yt-dlp + choose_best_stream_url
+      3) fallback
+    """
+    # 1) tentar CLI -g
+    direct = yt_dlp_get_direct_url_cli(url, cookiefile=cookiefile, timeout=timeout)
+    if direct:
+        logging.debug("yt-dlp -g respondeu: %s", direct)
+        return direct
+
+    # 2) tentar API se disponível
+    if YoutubeDL is not None:
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "dump_single_json": True,
+            "socket_timeout": timeout,
+            "geo_bypass": True,
+            "geo_bypass_country": "PT",
+            "xff": "PT",
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                )
+            },
+        }
+        if cookiefile:
+            ydl_opts["cookiefile"] = cookiefile
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            chosen = choose_best_stream_url(info)
+            return chosen
+        except Exception as e:
+            logging.debug("API yt-dlp falhou: %s", e)
+
+    # 3) fallback
+    return FALLBACK_M3U
 
 
 def sanitize_filename(name: str, max_len: int = 200) -> str:
-    """
-    Remove caracteres perigosos e limita o comprimento.
-    Mantém letras, números, espaços, '-', '_' e '.'.
-    Substitui '/', '\\', ':' etc por '_'.
-    """
     if not name:
         name = "canal"
-    # remover caracteres de controlo
     name = "".join(ch for ch in name if ord(ch) >= 32)
-    # substituir barras e dois-pontos e outros por underscore
     name = re.sub(r'[\\/:\*\?"<>\|]+', "_", name)
-    # permitir apenas um conjunto de caracteres
     name = re.sub(r'[^0-9A-Za-zÀ-ž \-\._]', '_', name)
-    # trim e limitar
     name = name.strip()
     if len(name) > max_len:
         name = name[:max_len].rstrip()
@@ -194,34 +222,78 @@ def sanitize_filename(name: str, max_len: int = 200) -> str:
     return name
 
 
-def url_to_safe_name(url: str) -> str:
+def convert_netscape_cookiefile_to_header(cookiefile_path: str) -> Optional[str]:
+    """
+    Converte um ficheiro de cookies (formato Netscape) para "name=value; name2=value2".
+    Se o ficheiro não estiver em formato Netscape, tentamos ler e ver se já está em
+    formato "name=value; ..." e retornamos directo.
+    """
+    if not cookiefile_path or not os.path.exists(cookiefile_path):
+        return None
     try:
-        p = urlparse(url)
-        safe = (p.netloc + p.path).strip("/")
-        if not safe:
-            safe = url
-        # codificar caracteres reservados para ainda ficar legível
-        safe = re.sub(r'[^0-9A-Za-zÀ-ž \-\._]', '_', safe)
-        return sanitize_filename(safe)
+        with open(cookiefile_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = [ln.rstrip("\n") for ln in f]
     except Exception:
-        return sanitize_filename(url)
+        return None
+
+    pairs = []
+    # detectar linhas tipo "nome=valor;" (já header-style) se existir
+    joined = "\n".join(lines)
+    if re.search(r'\w+=\S+;?', joined) and not any(line.startswith('#') for line in lines[:5]):
+        # tentar extrair nomes e vals simples (fallback)
+        for line in lines:
+            m = re.search(r'([A-Za-z0-9_\-]+)=([^;\s]+)', line)
+            if m:
+                pairs.append(f"{m.group(1)}={m.group(2)}")
+        if pairs:
+            return "; ".join(dict.fromkeys(pairs).keys())  # evita duplicados (mas devolve as chaves; pelo menos algo)
+    # Netscape format: domain \t flag \t path \t secure \t expiration \t name \t value
+    for line in lines:
+        if not line or line.startswith('#'):
+            continue
+        parts = re.split(r'\s+', line)
+        if len(parts) >= 7:
+            name = parts[5]
+            value = parts[6]
+            pairs.append(f"{name}={value}")
+        else:
+            # tentar parse por tabs
+            parts_tab = line.split('\t')
+            if len(parts_tab) >= 7:
+                name = parts_tab[5]
+                value = parts_tab[6]
+                pairs.append(f"{name}={value}")
+    if not pairs:
+        return None
+    # remover repetidos mantendo ordem
+    seen = set()
+    out = []
+    for p in pairs:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return "; ".join(out)
 
 
-def write_m3u8_file(outdir: str, channel_name: str, group_title: Optional[str], tvg_logo: Optional[str], tvg_id: Optional[str], stream_url: str) -> str:
+def write_m3u8_file(outdir: str, channel_name: str, group_title: Optional[str], tvg_logo: Optional[str],
+                    tvg_id: Optional[str], stream_url: str, cookie_header: Optional[str]) -> str:
     fname = sanitize_filename(channel_name) + ".m3u8"
     path = os.path.join(outdir, fname)
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write('#EXTM3U\n')
-            # escrever EXTINF com metadados se existirem
-            gi = group_title or ""
-            lg = tvg_logo or ""
-            tid = tvg_id or ""
-            # escapar aspas internas
-            gi = gi.replace('"', "'")
-            lg = lg.replace('"', "'")
-            tid = tid.replace('"', "'")
+            gi = (group_title or "").replace('"', "'")
+            lg = (tvg_logo or "").replace('"', "'")
+            tid = (tvg_id or "").replace('"', "'")
             f.write(f'#EXTINF:-1 group-title="{gi}" tvg-logo="{lg}" tvg-id="{tid}",{channel_name}\n')
+            # adicionar opções úteis para o VLC
+            f.write('#EXTVLCOPT:http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)\n')
+            f.write('#EXTVLCOPT:http-referrer=https://www.youtube.com/\n')
+            if cookie_header:
+                # escapamos aspas e `,` se necessário (VLC aceita cookie string)
+                cookie_header_safe = cookie_header.replace('"', "'")
+                f.write(f'#EXTVLCOPT:http-cookie={cookie_header_safe}\n')
+            # escrever a URL numa linha só
             f.write(stream_url.strip() + "\n")
         logging.info("Criado: %s", path)
     except Exception as e:
@@ -235,16 +307,19 @@ def process_file(infile: str, outdir: str, cookiefile: Optional[str], timeout: i
 
     os.makedirs(outdir, exist_ok=True)
 
+    cookie_header = None
+    if cookiefile:
+        cookie_header = convert_netscape_cookiefile_to_header(cookiefile)
+
     with open(infile, "r", encoding="utf-8", errors="ignore") as f:
         lines = [ln.rstrip("\n") for ln in f]
 
-    pending_meta = None  # quando virmos uma linha com pipes guardamos metadados até aparecer URL
+    pending_meta = None
     for line in lines:
         line = line.strip()
         if not line or line.startswith("~~"):
             continue
 
-        # se for uma linha de metadados (contains |) e não for uma URL
         if "|" in line and not line.lower().startswith("http"):
             parts = [p.strip() for p in line.split("|")]
             if len(parts) >= 4:
@@ -258,44 +333,39 @@ def process_file(infile: str, outdir: str, cookiefile: Optional[str], timeout: i
                     "tvg_logo": tvg_logo,
                     "tvg_id": tvg_id,
                 }
-                # não escrevemos ficheiro ainda — esperamos pela linha com a URL
                 continue
             else:
-                # linha comentada / inválida - reset pending_meta
                 pending_meta = None
                 continue
 
-        # se for linha com URL
         if line.lower().startswith("http"):
             logging.info("Processando URL: %s", line)
             stream = extract_stream_with_yt_dlp(line, cookiefile=cookiefile, timeout=timeout)
 
             if pending_meta:
-                ch_name = pending_meta.get("ch_name") or url_to_safe_name(line)
+                ch_name = pending_meta.get("ch_name") or line
                 grp_title = pending_meta.get("grp_title")
                 tvg_logo = pending_meta.get("tvg_logo")
                 tvg_id = pending_meta.get("tvg_id")
-                pending_meta = None  # consumido
+                pending_meta = None
             else:
-                # não havia metadados anteriores -> gerar nome a partir da URL
-                ch_name = url_to_safe_name(line)
+                ch_name = re.sub(r'https?://', '', line)
+                ch_name = ch_name.split('/')[0] + "_" + ch_name.split('/')[-1][:40]
                 grp_title = ""
                 tvg_logo = ""
                 tvg_id = ""
 
-            # escrever ficheiro .m3u8 dentro de outdir
-            write_m3u8_file(outdir, ch_name, grp_title, tvg_logo, tvg_id, stream)
+            write_m3u8_file(outdir, ch_name, grp_title, tvg_logo, tvg_id, stream, cookie_header)
             continue
 
-        # caso contrário, ignorar
         pending_meta = None
         continue
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Gerar um .m3u8 por canal (usa yt-dlp para obter melhor stream).")
+    parser = argparse.ArgumentParser(description="Gerar .m3u8 por canal com EXTVLCOPT (usa yt-dlp -g sempre que possível).")
     parser.add_argument("-i", "--input", default="../youtube_channel_info.txt", help="Ficheiro de input (default ../youtube_channel_info.txt)")
-    parser.add_argument("-o", "--outdir", default="canais", help="Pasta de output onde serão criados os .m3u8 (default ./canais)")
+    parser.add_argument("-o", "--outdir", default="canais", help="Pasta de output (default ./canais)")
     parser.add_argument("--timeout", type=int, default=15, help="Timeout para yt-dlp (segundos)")
     parser.add_argument("--debug", action="store_true", help="Ativa logging debug")
     args = parser.parse_args(argv)
@@ -314,7 +384,6 @@ def main(argv=None):
 
         process_file(args.input, args.outdir, cookiefile_path, args.timeout)
         logging.info("Processamento concluído. Ficheiros em: %s", os.path.abspath(args.outdir))
-
     finally:
         if cookiefile_path:
             remove_file_silent(cookiefile_path)
